@@ -1,0 +1,247 @@
+---
+title: "Sample size and sensitivity analyses"
+subtitle: "Does LLM Assistance Lead to Deskilling? A Longitudinal Multi-Domain Test"
+output:
+  html_document:
+    code_folding: hide
+    toc: false
+    self_contained: true
+    code_download: true
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+```
+
+## 1. Design and planning assumptions
+
+```{r parameters}
+n_domains <- 4
+n_cells <- 4
+alpha <- 0.05
+alpha_domain <- alpha / n_domains
+target_power <- 0.95
+d_target <- 0.20
+rho_performance <- 0.60
+d_adjusted <- d_target / sqrt(1 - rho_performance^2)
+attrition_rate <- 0.30
+```
+
+## 2. H1/H2: AI effect without incentive
+
+We approximate the baseline-adjusted AI contrast within each domain using a one-sided two-sample t-test with $d=`r d_target`/\sqrt{1-`r rho_performance`^2}=`r round(d_adjusted, 3)`$ to determine the analyzable sample per cell.
+
+```{r h1-h2}
+h1_h2 <- pwr::pwr.t.test(
+  d = -d_adjusted, sig.level = alpha_domain, power = target_power,
+  type = "two.sample", alternative = "less"
+)
+n_cell <- ceiling(h1_h2$n)
+N_domain <- n_cells * n_cell
+N_total <- n_domains * N_domain
+
+knitr::kable(data.frame(
+  Quantity = c("Required n per cell, before rounding", "Planned n per cell per domain",
+               "All four cells per domain", "Full study across four domains",
+               "H1/H2 no-incentive subset across domains"),
+  Value = c(sprintf("%.1f", h1_h2$n), n_cell, N_domain, N_total,
+            2 * n_cell * n_domains)
+), col.names = c("Quantity", "Participants"))
+```
+
+<details>
+<summary>Detailed results</summary>
+
+```{r h1-h2-raw}
+print(h1_h2, digits = 4)
+```
+
+</details>
+
+### Recruitment allowing for attrition
+
+We divide each cell's analyzable target by the expected retention of `r 100 * (1 - attrition_rate)`% and round up to obtain balanced recruitment targets.
+
+```{r attrition}
+n_recruit_cell <- ceiling(n_cell / (1 - attrition_rate))
+knitr::kable(data.frame(
+  Quantity = c("Recruit per cell per domain", "Recruit per domain",
+               "Recruit across four domains"),
+  Participants = c(n_recruit_cell, n_cells * n_recruit_cell,
+                   n_domains * n_cells * n_recruit_cell)
+))
+```
+
+## 3. H3/H4: incentive effect within AI
+
+We apply the same planning assumptions to the positive incentive contrast within the AI condition, using participants from the same study sample.
+
+```{r h3-h4}
+h3_h4 <- pwr::pwr.t.test(
+  d = d_adjusted, sig.level = alpha_domain, power = target_power,
+  type = "two.sample", alternative = "greater"
+)
+knitr::kable(data.frame(
+  n_per_cell = ceiling(h3_h4$n),
+  N_per_domain_contrast = 2 * ceiling(h3_h4$n),
+  N_contrast_across_domains = 2 * ceiling(h3_h4$n) * n_domains
+), col.names = c("n per cell per domain", "N per domain contrast",
+                 "N across four domains"))
+```
+
+<details>
+<summary>Detailed results</summary>
+
+```{r h3-h4-raw}
+print(h3_h4, digits = 4)
+```
+
+</details>
+
+## 4. H5/H6: pooled AI × incentive interaction
+
+We use the planned sample to approximate the minimum detectable interaction averaged equally across domains.
+
+```{r h5-h6}
+n_cell_pooled <- n_domains * n_cell
+d_int_mde_unadjusted <- (qnorm(1 - alpha) + qnorm(target_power)) *
+  sqrt(4 / n_cell_pooled)
+d_int_mde <- d_int_mde_unadjusted * sqrt(1 - rho_performance^2)
+
+knitr::kable(data.frame(
+  N = N_total,
+  n_per_pooled_cell = n_cell_pooled,
+  d_int_MDE_adjusted = round(d_int_mde, 3),
+  d_int_MDE_unadjusted = round(d_int_mde_unadjusted, 3)
+), col.names = c("Pooled N", "n per factorial cell across domains",
+                 "Interaction MDE with baseline adjustment (outcome SD units)",
+                 "Interaction MDE without baseline adjustment (outcome SD units)"))
+```
+
+<details>
+<summary>Detailed results</summary>
+
+```{r h5-h6-raw}
+print(c(d_int_MDE_adjusted = d_int_mde,
+        d_int_MDE_unadjusted = d_int_mde_unadjusted), digits = 4)
+```
+
+</details>
+
+## 5. H7: pooled signed metacognitive bias
+
+We use the planned no-incentive sample to find the minimum detectable positive AI effect on signed metacognitive bias averaged equally across domains.
+
+```{r h7}
+n_h7_per_AI_level <- n_domains * n_cell
+h7_power <- pwr::pwr.t.test(
+  n = n_h7_per_AI_level, d = d_target, sig.level = alpha,
+  type = "two.sample", alternative = "greater"
+)
+h7_mde <- pwr::pwr.t.test(
+  n = n_h7_per_AI_level, sig.level = alpha, power = target_power,
+  type = "two.sample", alternative = "greater"
+)$d
+
+knitr::kable(data.frame(
+  n_per_AI_level = n_h7_per_AI_level,
+  N_no_incentive = 2 * n_h7_per_AI_level,
+  Cohen_d_MDE = round(h7_mde, 3),
+  power_at_d_0_20 = sprintf("%.1f%%", 100 * h7_power$power)
+), col.names = c("n per AI level across domains", "Pooled no-incentive N",
+                 "Cohen's d MDE", "Power at d = 0.20"))
+```
+
+<details>
+<summary>Detailed results</summary>
+
+```{r h7-raw}
+print(h7_power, digits = 4)
+print(c(Cohen_d_MDE = h7_mde), digits = 4)
+```
+
+</details>
+
+## 6. Prolific cost estimate
+
+```{r prolific-costs}
+currency        <- "GBP"  # label only
+prolific_hourly <- 9.00   # GBP per hour
+session_minutes <- c(18, 13, 24, 11) # rounded observed minutes: baseline, training 1, training 2 + immediate test, delayed test
+# Assumed gaps: 1 week after baseline, shorter gap after training, 1 week after immediate test.
+gap_attrition   <- c(0.12, 0.05, NA_real_)
+gap_attrition[3] <- 1 - (1 - attrition_rate) / prod(1 - gap_attrition[1:2])
+prolific_fee    <- 0.33   # Prolific service fee on participant rewards
+vat_rate        <- 0.00   # VAT on the service fee (0.20 UK/EU; 0 if exempt)
+
+# Performance bonus in the two incentivized C+ arms
+bonus_per_item        <- 0.30 # GBP paid per correct item in the C+ arms
+n_items               <- 10
+expected_prop_correct <- 0.50 # expected fraction correct -> expected bonus base
+frac_bonus_arms       <- 0.50 # 2 of the 4 factorial cells are incentivized (C+)
+
+n_recruit         <- n_domains * n_cells * n_recruit_cell # balanced recruitment target
+session_n         <- c(n_recruit, ceiling(n_recruit * cumprod(1 - gap_attrition)))
+session_rewards   <- session_n * session_minutes / 60 * prolific_hourly
+minutes_total     <- sum(session_minutes)
+reward_per_person <- prolific_hourly * (minutes_total / 60)
+base_pay_total    <- sum(session_rewards)
+
+n_bonus_recruit  <- ceiling(session_n[3] * frac_bonus_arms) # bonus earned at immediate test
+bonus_per_person <- bonus_per_item * n_items * expected_prop_correct
+bonus_total      <- n_bonus_recruit * bonus_per_person
+
+rewards_total     <- base_pay_total + bonus_total # Prolific fee applies to bonuses too
+service_fee       <- rewards_total * prolific_fee
+vat_total         <- service_fee * vat_rate
+grand_total       <- rewards_total + service_fee + vat_total
+cost_per_analyzed <- grand_total / N_total
+
+knitr::kable(data.frame(
+  Quantity = c("Analyzable sample", "Attrition", "Participants to recruit",
+               "Attrition between sessions", "Participants by session",
+               "Session durations (minutes)", "Total duration (minutes)",
+               "Reward for all four sessions", "Base rewards by session",
+               "Base participant rewards", "Bonus-eligible participants at immediate test",
+               "Expected bonus per eligible participant", "Performance bonuses",
+               "Participant rewards including bonuses", "Prolific service fee",
+               "VAT on service fee", "Total study cost", "Cost per analyzable participant"),
+  Value = c(N_total, sprintf("%.0f%%", 100 * attrition_rate), n_recruit,
+            paste(sprintf("%.1f%%", 100 * gap_attrition), collapse = " / "),
+            paste(session_n, collapse = " / "),
+            paste(session_minutes, collapse = " / "), minutes_total,
+            sprintf("%s %.2f", currency, reward_per_person),
+            paste(sprintf("%s %.2f", currency, session_rewards), collapse = " / "),
+            sprintf("%s %.2f", currency, base_pay_total), n_bonus_recruit,
+            sprintf("%s %.2f", currency, c(bonus_per_person, bonus_total,
+                    rewards_total, service_fee, vat_total, grand_total,
+                    cost_per_analyzed)))
+))
+
+```
+
+### Per-participant cost and maximum bonus
+
+We calculate the cost of completing all sessions in each arm, including fees and either the expected or maximum performance bonus.
+
+```{r cost-per-participant}
+overhead  <- 1 + prolific_fee * (1 + vat_rate) # fee (+VAT) charged on every reward pound
+max_bonus <- bonus_per_item * n_items          # every scored item correct
+
+cost_control   <- reward_per_person * overhead
+cost_bonus_exp <- (reward_per_person + bonus_per_person) * overhead
+cost_bonus_max <- (reward_per_person + max_bonus) * overhead
+
+knitr::kable(data.frame(
+  Quantity = c("Base pay for all sessions", "Expected bonus (C+)",
+               "Maximum bonus (C+)", "Cost per control participant (C−)",
+               "Cost per bonus participant, expected (C+)",
+               "Cost per bonus participant, maximum (C+)",
+               "Cost per analyzable participant"),
+  Amount = sprintf("%s %.2f", currency,
+                   c(reward_per_person, bonus_per_person, max_bonus,
+                     cost_control, cost_bonus_exp, cost_bonus_max,
+                     cost_per_analyzed))
+))
+```
+

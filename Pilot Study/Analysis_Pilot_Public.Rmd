@@ -1,0 +1,1007 @@
+---
+title: "Pilot study: LLM support and unaided performance — Supplementary analyses"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float: true
+    number_sections: true
+date: "2026-10-30"
+---
+
+```{r setup}
+knitr::opts_chunk$set(
+  echo = TRUE, message = FALSE, warning = FALSE,
+  fig.width = 8, fig.height = 5, dpi = 120
+)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(emmeans)
+
+condition_levels <- c(
+  "Control_Group", "Control_Group_Bonus",
+  "AI_Group_Flat", "AI_Group_Bonus"
+)
+condition_labels <- c(
+  Control_Group = "Control (no incentive)",
+  Control_Group_Bonus = "Control + incentive",
+  AI_Group_Flat = "LLM (no incentive)",
+  AI_Group_Bonus = "LLM + incentive"
+)
+figure_font <- "sans"
+theme_set(
+  theme_minimal(base_size = 12, base_family = figure_font) +
+    theme(legend.position = "bottom", panel.grid.minor = element_blank())
+)
+
+# Knitting uses the directory containing this R Markdown file.
+figure_dir <- file.path("output", "figures")
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
+
+fmt_p <- function(p) {
+  ifelse(is.na(p), NA_character_,
+         ifelse(p < .001, "< .001", sprintf("%.3f", p)))
+}
+
+
+```
+
+# Data preparation
+
+The analysis uses participant scores and LLM request logs.
+
+```{r load-public-data}
+read_public <- function(name) read.csv(
+  file.path("data", name), na.strings = c("", "NA"),
+  check.names = FALSE, stringsAsFactors = FALSE
+)
+participants_all <- read_public("participants_public.csv")
+ai_consultations <- read_public("ai_consultations_public.csv")
+score_rounds <- c("bl", "t1", "t2", "test", "del")
+participants_all <- participants_all %>%
+  mutate(attention_check_passed = as.logical(attention_check_passed))
+# Unique participant IDs prevent joins from duplicating observations.
+stopifnot(!anyDuplicated(participants_all$participant_id))
+
+```
+
+```{r prepare-public-participants}
+score_proportion <- function(correct, total) {
+  ifelse(!is.na(total) & total > 0, correct / total, NA_real_)
+}
+for (phase in score_rounds) {
+  correct <- participants_all[[paste0(phase, "_score_correct")]]
+  total <- participants_all[[paste0(phase, "_score_total")]]
+  stopifnot(all(total >= 0, na.rm = TRUE),
+            all(correct >= 0 & correct <= total, na.rm = TRUE))
+  participants_all[[paste0(phase, "_score_proportion")]] <- score_proportion(correct, total)
+}
+participants_all <- participants_all %>%
+  mutate(
+    consent_withdrawn = status == "withdrawn",
+    assigned = group_condition %in% condition_levels,
+    has_baseline = !is.na(bl_score_proportion),
+    has_training_1 = !is.na(t1_score_proportion),
+    has_training_2 = !is.na(t2_score_proportion),
+    has_immediate_test = !is.na(test_score_proportion),
+    has_delayed_test = !is.na(del_score_proportion),
+    attention_check_missing = is.na(attention_check_passed),
+    attention_check_passed = coalesce(attention_check_passed, FALSE),
+    declined_data_use = coalesce(use_data_for_study == "no", FALSE),
+    ai = ifelse(assigned, as.integer(group_condition %in%
+                  c("AI_Group_Flat", "AI_Group_Bonus")), NA_integer_),
+    incentive = ifelse(assigned, as.integer(group_condition %in%
+                         c("Control_Group_Bonus", "AI_Group_Bonus")), NA_integer_),
+    condition_label = factor(unname(condition_labels[group_condition]),
+                             levels = unname(condition_labels[condition_levels])),
+    predicted_proportion = score_proportion(test_predicted_correct, test_prediction_n_items),
+    metacognitive_bias = predicted_proportion - test_score_proportion,
+    included_retention = assigned & !consent_withdrawn & !declined_data_use & has_baseline
+  )
+sample_steps <- list(
+  "Approved on Prolific" = participants_all$recruitment_status == "APPROVED",
+  "Consent not withdrawn" = !participants_all$consent_withdrawn,
+  "Continued after baseline" = participants_all$assigned,
+  "Reached immediate unaided test" = participants_all$has_immediate_test,
+  "Passed the attention check" = participants_all$attention_check_passed,
+  "Honesty check approved" = !participants_all$declined_data_use
+)
+sample_kept <- Reduce(`&`, sample_steps, accumulate = TRUE)
+participants_all <- participants_all %>%
+  mutate(
+    included_primary = sample_kept[[length(sample_kept)]],
+    exclusion_reason = case_when(
+      consent_withdrawn ~ "Consent withdrawn",
+      !assigned ~ "Dropped out after baseline",
+      !has_immediate_test ~ "No immediate test",
+      !attention_check_passed ~ "Attention check not passed",
+      declined_data_use ~ "Excluded: honesty check not approved",
+      TRUE ~ "Included"
+    )
+  )
+participants <- participants_all %>%
+  filter(included_primary) %>%
+  mutate(baseline_c = bl_score_proportion - mean(bl_score_proportion))
+
+```
+
+## Primary-sample age
+
+Age statistics are calculated from `primary_sample_age_aggregates.csv`; individual ages are omitted from the public data.
+
+```{r primary-sample-age}
+age_aggregates <- read_public("primary_sample_age_aggregates.csv")
+# The anonymised age aggregates must describe the analysed sample.
+stopifnot(age_aggregates$n_participants == nrow(participants))
+age_summary <- age_aggregates %>%
+  transmute(
+    N = n_participants,
+    N_age = n_age,
+    N_missing_age = n_participants - n_age,
+    Mean_age = sum_age / n_age,
+    SD_age = sqrt((sum_squared_age - sum_age^2 / n_age) / (n_age - 1)),
+    Min_age = min_age,
+    Max_age = max_age
+  )
+knitr::kable(age_summary, digits = c(0, 0, 0, 1, 1, 0, 0))
+cat(sprintf(
+  "The mean age of participants in the primary sample was %.1f years (SD = %.1f, range = %d–%d).\n",
+  age_summary$Mean_age, age_summary$SD_age,
+  age_summary$Min_age, age_summary$Max_age
+))
+```
+
+LLM use is defined as at least one request, counted across the 14 training items and separately for each item.
+
+```{r prepare-public-consultation}
+request_counts <- ai_consultations %>%
+  count(participant_id, training_session, item_position, name = "prompt_count") %>%
+  rename(position = item_position)
+ai_training_items <- tidyr::crossing(
+  participant_id = participants$participant_id[participants$ai == 1],
+  training_session = 1:2, position = 1:7
+) %>%
+  left_join(request_counts, by = c("participant_id", "training_session", "position")) %>%
+  mutate(prompt_count = coalesce(prompt_count, 0L), any_use = prompt_count > 0) %>%
+  left_join(participants %>% select(participant_id, incentive), by = "participant_id")
+participant_consultation <- ai_training_items %>%
+  group_by(participant_id) %>%
+  summarise(used_ai_training = any(any_use),
+            ai_consulted_items_percent = 100 * mean(any_use), .groups = "drop")
+participants <- participants %>% left_join(participant_consultation, by = "participant_id")
+ai_item_consultation <- ai_training_items %>%
+  group_by(incentive, training_session, position) %>%
+  summarise(n = n(), consulted = sum(any_use), percent = 100 * mean(any_use),
+            .groups = "drop") %>%
+  mutate(
+    condition = factor(incentive, levels = c(0, 1), labels = c("No incentive", "Incentive")),
+    session = factor(training_session, levels = c(1, 2),
+                     labels = c("Practice session 1", "Practice session 2")),
+    item_position = factor(position, levels = 1:7)
+  )
+recorded_training_counts <- participants %>% filter(ai == 1) %>%
+  select(participant_id, t1_ai_requests_count, t2_ai_requests_count) %>%
+  pivot_longer(c(t1_ai_requests_count, t2_ai_requests_count),
+               names_to = "training_session", values_to = "recorded_requests") %>%
+  mutate(training_session = ifelse(training_session == "t1_ai_requests_count", 1L, 2L)) %>%
+  left_join(ai_training_items %>% group_by(participant_id, training_session) %>%
+    summarise(observed_requests = sum(prompt_count), .groups = "drop"),
+    by = c("participant_id", "training_session"))
+# Reconcile request logs with participant-level totals before analysing LLM use.
+stopifnot(all(
+  recorded_training_counts$recorded_requests == recorded_training_counts$observed_requests
+))
+```
+
+# Results from pilot data
+
+Condition means, standard deviations, and assessment sample sizes correspond to Supplementary Table 7.
+
+```{r condition-main-outcomes}
+condition_outcomes <- participants %>%
+  group_by(condition_label, .drop = FALSE) %>%
+  summarise(
+    N_T1 = n(), N_T2 = sum(has_delayed_test),
+    across(c(bl_score_proportion, metacognitive_bias,
+             test_score_proportion, del_score_proportion),
+      ~ sprintf("%.2f (%.2f)", mean(.x, na.rm = TRUE), sd(.x, na.rm = TRUE))),
+    .groups = "drop"
+  )
+knitr::kable(condition_outcomes)
+```
+
+<details>
+<summary>Full output and unformatted results</summary>
+
+```{r condition-main-outcomes-raw}
+condition_outcomes_raw <- participants %>%
+  group_by(condition_label, .drop = FALSE) %>%
+  summarise(
+    N_T1 = n(), N_T2 = sum(has_delayed_test),
+    across(c(bl_score_proportion, metacognitive_bias,
+             test_score_proportion, del_score_proportion),
+      list(mean = ~ mean(.x, na.rm = TRUE), sd = ~ sd(.x, na.rm = TRUE))),
+    .groups = "drop"
+  )
+print(as.data.frame(condition_outcomes_raw), digits = 17, row.names = FALSE)
+```
+
+</details>
+
+The performance model (Equation 1) tests H1–H6; the metacognitive-bias model (Equation 2) tests H7. The performance and learning-trajectory mixed models use restricted maximum likelihood (REML) and Satterthwaite degrees of freedom for contrasts and confidence intervals.
+
+```{r design-table-models}
+design_equivalence_d <- c(H1 = .20, H2 = .20, H3 = .20, H4 = .20,
+                          H5 = .10, H6 = .10, H7 = .10)
+
+pooled_cell_standardizer <- function(outcome, group) {
+  keep <- complete.cases(outcome, group)
+  cells <- split(outcome[keep], factor(group[keep]))
+  cell_n <- vapply(cells, length, integer(1))
+  if (any(cell_n < 2L)) {
+    stop("Equivalence standardization requires at least two observations per cell.")
+  }
+  list(
+    sd = sqrt(sum((cell_n - 1) * vapply(cells, var, numeric(1))) / sum(cell_n - 1)),
+    df = sum(cell_n - 1)
+  )
+}
+
+summarize_design_contrast <- function(grid, weights, hypothesis, outcome,
+                                      direction, standardizer) {
+  bound <- design_equivalence_d[[hypothesis]] * standardizer$sd
+  comparison <- contrast(
+    grid, method = setNames(list(weights), hypothesis), adjust = "none"
+  )
+  result <- as.data.frame(confint(comparison, level = .90, adjust = "none"))
+  standardized <- as.data.frame(summary(
+    emmeans::eff_size(comparison, sigma = standardizer$sd,
+                      edf = standardizer$df, method = "identity"),
+    infer = c(FALSE, FALSE)
+  ))
+  p_directional <- emmeans::test(
+    comparison, side = if (direction == "negative") "<" else ">", adjust = "none"
+  )$p.value
+  p_equivalence <- emmeans::test(
+    comparison, delta = bound, side = "two-sided", adjust = "none"
+  )$p.value
+  data.frame(
+    Hypothesis = hypothesis, Outcome = outcome,
+    Contrast = dplyr::case_when(
+      hypothesis %in% c("H1", "H2", "H7") ~ "LLM − control, no incentive",
+      hypothesis %in% c("H3", "H4") ~ "Incentive − no incentive, LLM",
+      TRUE ~ "LLM × incentive"
+    ),
+    estimate = result$estimate, SE = result$SE, df = result$df,
+    CI_low = result$lower.CL, CI_high = result$upper.CL,
+    standardizing_sd = standardizer$sd, standardizing_df = standardizer$df,
+    cohens_d = standardized$effect.size, equivalence_bound = bound,
+    p_one_sided = p_directional, p_equivalence = p_equivalence,
+    Interpretation = dplyr::case_when(
+      p_directional < .05 & p_equivalence < .05 ~
+        "Evidence in predicted direction; equivalent within bounds",
+      p_directional < .05 ~ "Evidence in predicted direction",
+      p_equivalence < .05 ~ "Equivalent within bounds",
+      TRUE ~ "Inconclusive"
+    )
+  )
+}
+
+fit_design_table <- function(dat) {
+  long <- dat %>%
+    select(participant_id, ai, incentive, baseline_c,
+           Immediate = test_score_proportion, Delayed = del_score_proportion) %>%
+    pivot_longer(c(Immediate, Delayed), names_to = "time", values_to = "performance") %>%
+    filter(complete.cases(performance, baseline_c)) %>%
+    mutate(time = factor(time, levels = c("Immediate", "Delayed")))
+  performance_model <- lme4::lmer(
+    performance ~ time * (ai * incentive + baseline_c) + (1 | participant_id),
+    data = long, REML = TRUE
+  )
+  performance_grid <- emmeans(
+    performance_model, ~ ai * incentive | time,
+    at = list(ai = c(0, 1), incentive = c(0, 1), baseline_c = 0),
+    lmer.df = "satterthwaite"
+  )
+  # Explicit grid order: control/no incentive, LLM/no incentive,
+  # control/incentive, LLM/incentive.
+  stopifnot(
+    identical(as.numeric(performance_grid@grid$ai), rep(c(0, 1, 0, 1), 2)),
+    identical(as.numeric(performance_grid@grid$incentive), rep(c(0, 0, 1, 1), 2))
+  )
+  results <- bind_rows(lapply(c("Immediate", "Delayed"), function(assessment) {
+    grid <- performance_grid[performance_grid@grid$time == assessment, ]
+    observed <- long %>% filter(time == assessment)
+    no_inc <- observed %>% filter(incentive == 0)
+    ai_only <- observed %>% filter(ai == 1)
+    numbers <- if (assessment == "Immediate") c("H1", "H3", "H5") else c("H2", "H4", "H6")
+    no_inc_scale <-
+      pooled_cell_standardizer(no_inc$performance, no_inc$ai)
+    ai_only_scale <-
+      pooled_cell_standardizer(ai_only$performance, ai_only$incentive)
+    interaction_scale <- pooled_cell_standardizer(
+      observed$performance, interaction(observed$ai, observed$incentive))
+    bind_rows(
+      summarize_design_contrast(grid, c(-1, 1, 0, 0), numbers[1], assessment,
+        "negative", no_inc_scale),
+      summarize_design_contrast(grid, c(0, -1, 0, 1), numbers[2], assessment,
+        "positive", ai_only_scale),
+      summarize_design_contrast(grid, c(1, -1, -1, 1), numbers[3], assessment,
+        "positive", interaction_scale)
+    )
+  }))
+  # Equation 2 specifies H7 without baseline adjustment.
+  bias_model <- lm(metacognitive_bias ~ ai * incentive, data = dat)
+  bias_grid <- emmeans(bias_model, ~ ai * incentive,
+    at = list(ai = c(0, 1), incentive = c(0, 1)))
+  no_inc <- dat %>% filter(incentive == 0)
+  bias_scale <-
+    pooled_cell_standardizer(no_inc$metacognitive_bias, no_inc$ai)
+  results <- bind_rows(results,
+    summarize_design_contrast(bias_grid, c(-1, 1, 0, 0), "H7", "Immediate bias",
+      "positive", bias_scale)) %>%
+    arrange(Hypothesis)
+  list(performance_model = performance_model, bias_model = bias_model,
+       performance_grid = performance_grid, long = long, results = results)
+}
+
+format_design_results <- function(results) {
+  results %>% transmute(
+    Hypothesis, Outcome, Contrast,
+    `Effect (pp)` = sprintf("%.2f", 100 * estimate),
+    `90% CI (pp)` = sprintf("[%.2f, %.2f]", 100 * CI_low, 100 * CI_high),
+    `Cohen's d` = sprintf("%.2f", cohens_d),
+    `One-sided p` = fmt_p(p_one_sided),
+    `Equivalence bounds (d)` = sprintf("±%.2f", equivalence_bound / standardizing_sd),
+    `Equivalence p` = fmt_p(p_equivalence),
+    Interpretation
+  )
+}
+
+design_table <- fit_design_table(participants)
+```
+
+```{r design-table-model-summaries}
+knitr::kable(coef(summary(design_table$performance_model)),
+             digits = 3, caption = "Performance model: fixed effects")
+knitr::kable(as.data.frame(lme4::VarCorr(design_table$performance_model)),
+             digits = 3, caption = "Performance model: variance components")
+knitr::kable(coef(summary(design_table$bias_model)),
+             digits = 3, caption = "Metacognitive-bias model: coefficients")
+bias_summary <- summary(design_table$bias_model)
+knitr::kable(data.frame(
+  N = nobs(design_table$bias_model),
+  Residual_SE = bias_summary$sigma,
+  Residual_df = df.residual(design_table$bias_model),
+  R_squared = bias_summary$r.squared,
+  Adjusted_R_squared = bias_summary$adj.r.squared,
+  F = unname(bias_summary$fstatistic["value"]),
+  Numerator_df = unname(bias_summary$fstatistic["numdf"]),
+  Denominator_df = unname(bias_summary$fstatistic["dendf"])
+), digits = 3, caption = "Metacognitive-bias model: fit statistics")
+```
+
+<details>
+<summary>Full output and unformatted results</summary>
+
+```{r design-table-model-summaries-raw}
+print(summary(design_table$performance_model), correlation = TRUE, digits = 17)
+print(summary(design_table$bias_model), correlation = TRUE, digits = 17)
+```
+
+</details>
+
+The H1–H7 contrasts and two-sided 90% confidence intervals are expressed in percentage points. Cohen’s d uses the applicable pooled within-cell SD. The table also reports one-sided directional tests and equivalence tests with bounds of ±0.20 within-cell SD units for H1–H4 and ±0.10 for H5–H7.
+
+```{r design-table-results}
+knitr::kable(format_design_results(design_table$results))
+```
+
+<details>
+<summary>Full output and unformatted results</summary>
+
+```{r design-table-results-raw}
+print(as.data.frame(design_table$results), digits = 17, row.names = FALSE)
+```
+
+</details>
+
+## Performance results figure
+
+Figure 3 shows observed baseline means and baseline-adjusted immediate and delayed performance by condition, with 90% confidence intervals.
+
+```{r performance-results-figure, fig.width=160/25.4, fig.height=135/25.4, dpi=300}
+results_conditions <- tibble::tibble(
+  condition = condition_levels,
+  ai = c(0, 0, 1, 1), incentive = c(0, 1, 0, 1),
+  label = c("Control", "Control + incentive", "LLM", "LLM + incentive"),
+  colour = c("#808080", "#0072B2", "#7B3294", "#159E7C"),
+  shape = c(16, 17, 15, 18), open_shape = c(21, 24, 22, 23),
+  size = c(2, 2.3, 1.8, 2.5), panel_x = c(1, 4, 2, 3),
+  offset = c(-.06, -.02, .02, .06)
+)
+results_colours <- setNames(results_conditions$colour, results_conditions$condition)
+results_shapes <- setNames(results_conditions$shape, results_conditions$condition)
+results_open_shapes <- setNames(results_conditions$open_shape, results_conditions$condition)
+results_sizes <- setNames(results_conditions$size, results_conditions$condition)
+results_labels <- setNames(results_conditions$label, results_conditions$condition)
+results_offsets <- setNames(results_conditions$offset, results_conditions$condition)
+results_font <- "Helvetica"
+results_ci_level <- .90
+results_y_limits <- c(30, 70)
+results_time_x <- c(Baseline = 1, Immediate = 3.3, Delayed = 4.5)
+results_practice_x <- c(1.7, 3)
+results_bracket_y <- 71
+results_dimensions <- c(width = 160, height = 135)
+results_theme <- theme_classic(base_size = 7, base_family = results_font) +
+  theme(
+    axis.text = element_text(size = 7, colour = "black"),
+    axis.title = element_text(size = 7),
+    axis.line = element_line(linewidth = .25),
+    axis.ticks = element_line(linewidth = .25),
+    axis.ticks.length = grid::unit(1, "mm"),
+    plot.margin = margin(2, 3, 1, 3, unit = "mm")
+  )
+
+results_cells <- as.data.frame(confint(
+  design_table$performance_grid, level = results_ci_level, adjust = "none"
+)) %>%
+  left_join(results_conditions, by = c("ai", "incentive")) %>%
+  transmute(ai, incentive, group = factor(condition, levels = condition_levels),
+            assessment = factor(time, levels = c("Immediate", "Delayed")),
+            centre = emmean, lower = lower.CL, upper = upper.CL, x = panel_x)
+results_baseline_cells <- participants %>%
+  transmute(group = factor(group_condition, levels = condition_levels),
+            score = bl_score_proportion) %>%
+  filter(!is.na(score)) %>%
+  group_by(group) %>%
+  summarise(n = n(), centre = mean(score), spread = sd(score), .groups = "drop") %>%
+  mutate(
+    assessment = "Baseline",
+    lower = centre - qt((1 + results_ci_level) / 2, n - 1) * spread / sqrt(n),
+    upper = centre + qt((1 + results_ci_level) / 2, n - 1) * spread / sqrt(n)
+  )
+results_trajectory_cells <- bind_rows(
+  results_baseline_cells %>% select(group, assessment, centre, lower, upper),
+  results_cells %>% transmute(group, assessment = as.character(assessment), centre, lower, upper)
+) %>%
+  mutate(
+    assessment = factor(assessment, levels = names(results_time_x)),
+    x = results_time_x[as.character(assessment)] + results_offsets[as.character(group)]
+  )
+results_practice_paths <- results_trajectory_cells %>%
+  filter(assessment == "Immediate") %>%
+  left_join(results_trajectory_cells %>% filter(assessment == "Baseline") %>%
+              select(group, baseline_x = x, baseline_mean = centre), by = "group")
+
+results_trajectory_panel <- ggplot(results_trajectory_cells, aes(x, colour = group, shape = group)) +
+  annotate("rect", xmin = results_practice_x[1], xmax = results_practice_x[2],
+           ymin = results_y_limits[1], ymax = results_y_limits[2], fill = "#F2F2F2", colour = NA) +
+  annotate("text", x = mean(results_practice_x), y = 67.5, label = "Practice",
+           family = results_font, fontface = "bold", colour = "#555555", size = 7 / ggplot2::.pt) +
+  geom_segment(data = results_practice_paths,
+               aes(x = baseline_x, y = 100 * baseline_mean, xend = x, yend = 100 * centre),
+               linetype = "dashed", linewidth = .4, show.legend = FALSE) +
+  geom_line(data = filter(results_trajectory_cells, assessment != "Baseline"),
+            aes(y = 100 * centre, group = group), linewidth = .4) +
+  geom_errorbar(aes(ymin = 100 * lower, ymax = 100 * upper),
+                width = 0, linewidth = .4, show.legend = FALSE) +
+  geom_point(data = filter(results_trajectory_cells, assessment == "Baseline"),
+             aes(y = 100 * centre, size = group), fill = "white", stroke = .4, show.legend = FALSE) +
+  geom_point(data = filter(results_trajectory_cells, assessment != "Baseline"),
+             aes(y = 100 * centre, size = group, fill = group), stroke = .2) +
+  scale_colour_manual(values = results_colours, labels = results_labels, name = NULL) +
+  scale_shape_manual(values = results_open_shapes, labels = results_labels, name = NULL) +
+  scale_fill_manual(values = results_colours, guide = "none") +
+  scale_size_manual(values = results_sizes, guide = "none") +
+  guides(colour = guide_legend(nrow = 2, byrow = TRUE,
+                              override.aes = list(fill = unname(results_colours))),
+         shape = guide_legend(nrow = 2, byrow = TRUE)) +
+  scale_x_continuous(
+    breaks = c(results_time_x[1], mean(results_practice_x), results_time_x[2:3]),
+    labels = c("Baseline\nDay 0", "2 practice sessions\n+1 week",
+               "Immediate test", "Delayed test\n+1 week"),
+    expand = expansion(mult = 0)
+  ) +
+  scale_y_continuous(breaks = seq(results_y_limits[1], results_y_limits[2], 10),
+                     expand = expansion(mult = 0)) +
+  coord_cartesian(xlim = c(.65, 4.8), ylim = results_y_limits) +
+  labs(x = NULL, y = "Unaided performance (%)", title = "Baseline and follow-up performance", tag = "a") +
+  results_theme +
+  theme(
+    plot.title = element_text(size = 7, face = "bold", hjust = .5),
+    plot.tag = element_text(size = 8, face = "bold"),
+    plot.tag.position = "topleft",
+    legend.position = "bottom",
+    legend.text = element_text(size = 6),
+    legend.key.width = grid::unit(6, "mm"),
+    legend.key.height = grid::unit(3, "mm")
+  )
+
+results_annotations <- design_table$results %>%
+  filter(Hypothesis %in% c("H1", "H2", "H3", "H4")) %>%
+  mutate(
+    assessment = factor(Outcome, levels = c("Immediate", "Delayed")),
+    x_start = ifelse(Hypothesis %in% c("H1", "H2"), 1, 2),
+    x_end = x_start + 1,
+    bracket_left = ifelse(x_start == 1, 1, 2.06),
+    bracket_right = ifelse(x_end == 3, 3, 1.94),
+    stars = case_when(
+      p_one_sided < .001 ~ "***", p_one_sided < .01 ~ "**",
+      p_one_sided < .05 ~ "*", TRUE ~ ""
+    ),
+    p_label = paste0("italic(P) == '", formatC(p_one_sided, digits = 3, format = "f"), "'"),
+    p_label = ifelse(stars == "", p_label, paste0(p_label, "~'", stars, "'"))
+  )
+results_assessments <- data.frame(
+  assessment = factor(c("Immediate", "Delayed"), levels = c("Immediate", "Delayed")),
+  panel = c("b", "c")
+)
+results_panel_labels <- results_conditions %>% arrange(panel_x) %>% pull(label)
+performance_adjusted_panels <- ggplot(results_cells, aes(x, colour = group, shape = group)) +
+  geom_errorbar(aes(ymin = 100 * lower, ymax = 100 * upper), width = 0, linewidth = .45) +
+  geom_point(aes(y = 100 * centre, size = group), stroke = 0) +
+  geom_segment(data = results_annotations,
+               aes(x = bracket_left, xend = bracket_right,
+                   y = results_bracket_y, yend = results_bracket_y),
+               inherit.aes = FALSE, linewidth = .25) +
+  geom_segment(data = results_annotations,
+               aes(x = bracket_left, xend = bracket_left,
+                   y = results_bracket_y - .8, yend = results_bracket_y),
+               inherit.aes = FALSE, linewidth = .25) +
+  geom_segment(data = results_annotations,
+               aes(x = bracket_right, xend = bracket_right,
+                   y = results_bracket_y - .8, yend = results_bracket_y),
+               inherit.aes = FALSE, linewidth = .25) +
+  geom_text(data = results_annotations,
+            aes(x = (bracket_left + bracket_right) / 2,
+                y = results_bracket_y + .8, label = p_label),
+            inherit.aes = FALSE, family = results_font, size = 7 / ggplot2::.pt,
+            parse = TRUE, vjust = 0) +
+  geom_text(data = results_assessments,
+            aes(x = .4, y = results_bracket_y + 1, label = panel),
+            inherit.aes = FALSE, family = results_font, fontface = "bold",
+            size = 8 / ggplot2::.pt, hjust = 0) +
+  facet_wrap(~ assessment, nrow = 1, strip.position = "top", axes = "all_y", axis.labels = "all_y") +
+  scale_colour_manual(values = results_colours) +
+  scale_shape_manual(values = results_shapes) +
+  scale_size_manual(values = results_sizes) +
+  scale_x_continuous(breaks = 1:4, labels = gsub(" + ", " +\n", results_panel_labels, fixed = TRUE),
+                     expand = expansion(mult = 0)) +
+  scale_y_continuous(breaks = seq(results_y_limits[1], results_y_limits[2], 10),
+                     expand = expansion(mult = 0)) +
+  coord_cartesian(xlim = c(.4, 4.6), ylim = results_y_limits, clip = "off") +
+  labs(x = NULL, y = "Unaided performance (%)") +
+  results_theme +
+  theme(
+    axis.text.x = element_text(margin = margin(t = 2, unit = "mm")),
+    legend.position = "none",
+    strip.background = element_blank(),
+    strip.placement = "outside",
+    strip.text = element_text(size = 7, face = "bold", margin = margin(b = 8, unit = "mm")),
+    panel.spacing = grid::unit(5, "mm")
+  )
+results_trajectory_grob <- ggplotGrob(results_trajectory_panel)
+results_legend <- results_trajectory_grob$grobs[[which(results_trajectory_grob$layout$name == "guide-box-bottom")]]
+performance_results_figure <- patchwork::wrap_plots(
+  patchwork::wrap_elements(full = results_trajectory_panel + theme(legend.position = "none")) +
+    theme(plot.margin = margin(0, 0, 0, 0)),
+  performance_adjusted_panels, patchwork::wrap_elements(full = results_legend),
+  ncol = 1, heights = c(1, 1, .12)
+)
+print(performance_results_figure)
+ggsave(file.path(figure_dir, "performance_results.pdf"), performance_results_figure,
+       width = results_dimensions["width"], height = results_dimensions["height"], units = "mm",
+       device = grDevices::cairo_pdf, bg = "white")
+ggsave(file.path(figure_dir, "performance_results.png"), performance_results_figure,
+       width = results_dimensions["width"], height = results_dimensions["height"], units = "mm",
+       dpi = 600, bg = "white")
+```
+
+# Effects of financial incentive on LLM use
+
+LLM uptake is the percentage of LLM-assigned participants who made at least one request. Welch’s test compares the participant-level percentage of training items consulted between incentive conditions.
+
+```{r appendix-ai-consultation}
+appendix_ai_consultation <- participants %>%
+  filter(ai == 1) %>%
+  group_by(incentive) %>%
+  summarise(
+    N = n(), Users = sum(used_ai_training),
+    `Any LLM use (%)` = 100 * mean(used_ai_training),
+    `Items with LLM use (%)` = mean(ai_consulted_items_percent),
+    `Items with LLM use SD (pp)` = sd(ai_consulted_items_percent),
+    .groups = "drop"
+  ) %>%
+  mutate(Condition = ifelse(incentive == 0, "No incentive", "Incentive")) %>%
+  select(Condition, N, Users, `Any LLM use (%)`, `Items with LLM use (%)`,
+         `Items with LLM use SD (pp)`)
+knitr::kable(appendix_ai_consultation, digits = c(0, 0, 0, 1, 1, 1))
+ai_item_welch <- with(filter(participants, ai == 1), t.test(
+  ai_consulted_items_percent[incentive == 1],
+  ai_consulted_items_percent[incentive == 0],
+  alternative = "two.sided", conf.level = .95
+))
+appendix_ai_item_contrast <- data.frame(
+  Contrast = "Incentive minus no incentive",
+  Difference_pp = unname(ai_item_welch$estimate[1] - ai_item_welch$estimate[2]),
+  CI_low = ai_item_welch$conf.int[1], CI_high = ai_item_welch$conf.int[2],
+  t = unname(ai_item_welch$statistic), df = unname(ai_item_welch$parameter),
+  p = fmt_p(ai_item_welch$p.value)
+)
+knitr::kable(appendix_ai_item_contrast, digits = 2)
+```
+
+<details>
+<summary>Full output and unformatted results</summary>
+
+```{r appendix-ai-consultation-raw}
+print(as.data.frame(appendix_ai_consultation), digits = 17, row.names = FALSE)
+print(ai_item_welch, digits = 17)
+```
+
+</details>
+
+Supplementary Fig. 2 shows the percentage of participants consulting LLM on each practice item, by session and incentive condition.
+
+```{r exploratory-ai-item-use-plot, fig.width=180/25.4, fig.height=73/25.4, dpi=600, fig.cap="Participants consulting the LLM on each practice item, by incentive condition and session. Red: incentive; grey: no incentive. The primary sample includes participants with zero LLM use."}
+ai_item_consultation_plot <- ggplot(ai_item_consultation, aes(item_position, percent, fill = condition)) +
+  geom_col(position = position_dodge(width = .72), width = .64) +
+  facet_wrap(~ session, nrow = 1, axes = 'all_y') +
+  scale_fill_manual(values = c('No incentive' = '#AAAAAA', 'Incentive' = '#B5362B'),
+                    breaks = c('No incentive', 'Incentive')) +
+  scale_y_continuous(limits = c(0, 100), breaks = seq(0, 100, 20),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(x = 'Practice item', y = 'Participants consulting the LLM (%)', fill = NULL) +
+  theme_classic(base_size = 7, base_family = figure_font) +
+  theme(text = element_text(size = 7, color = 'black'),
+        axis.text = element_text(size = 7, color = 'black'),
+        axis.title = element_text(size = 7),
+        axis.line = element_line(linewidth = .2, color = 'black'),
+        axis.ticks = element_line(linewidth = .2, color = 'black'),
+        axis.ticks.x = element_blank(),
+        axis.ticks.length = grid::unit(1, 'mm'),
+        axis.text.x = element_text(margin = margin(t = 4)),
+        strip.background = element_blank(),
+        strip.text = element_text(face = 'plain', size = 7, hjust = .075,
+                                  margin = margin(t = 2, b = 12)),
+        axis.title.x = element_text(margin = margin(t = 11)),
+        axis.title.y = element_text(margin = margin(r = 8)),
+        legend.position = 'right',
+        legend.justification = c(0, .84),
+        legend.text = element_text(size = 7),
+        legend.key.size = grid::unit(2.5, 'mm'),
+        legend.key.spacing.y = grid::unit(1, 'mm'),
+        legend.margin = margin(0, 0, 0, 2),
+        panel.spacing = grid::unit(10, 'mm'),
+        plot.margin = margin(4, 4, 4, 4))
+
+# Place panel letters beside the session titles, outside the plotting areas.
+ai_item_consultation_plot <- ggplotGrob(ai_item_consultation_plot)
+ai_strip_layout <- ai_item_consultation_plot$layout[
+  grepl('^strip-t', ai_item_consultation_plot$layout$name), ]
+ai_strip_layout <- ai_strip_layout[order(ai_strip_layout$l), ]
+for (i in seq_len(nrow(ai_strip_layout))) {
+  ai_item_consultation_plot <- gtable::gtable_add_grob(
+    ai_item_consultation_plot,
+    grid::textGrob(letters[i], x = 0, y = 1, just = c('left', 'top'),
+                   gp = grid::gpar(fontfamily = figure_font, fontface = 'bold', fontsize = 9)),
+    t = ai_strip_layout$t[i], l = ai_strip_layout$l[i] - 1,
+    clip = 'off', name = paste0('panel-letter-', i)
+  )
+}
+grid::grid.newpage()
+grid::grid.draw(ai_item_consultation_plot)
+
+ggsave(
+  file.path(figure_dir, "ai_items_consulted.png"),
+  plot = ai_item_consultation_plot,
+  width = 180, height = 73, units = "mm",
+  dpi = 600, bg = "white"
+)
+ggsave(
+  file.path(figure_dir, "ai_items_consulted.pdf"),
+  plot = ai_item_consultation_plot,
+  width = 180, height = 73, units = "mm",
+  device = grDevices::cairo_pdf, bg = "white"
+)
+```
+
+# Changes in unaided performance without LLM assistance
+
+Among participants without incentives, a mixed model estimates performance by assessment, LLM assignment, and their interaction, with a random intercept for each participant.
+
+```{r control-learning-model}
+trajectory_participants <- participants %>%
+  filter(incentive == 0) %>%
+  transmute(
+    participant_id,
+    ai_group = factor(
+      ai,
+      levels = c(0, 1),
+      labels = c("Control", "LLM")
+    ),
+    Baseline = bl_score_proportion,
+    Immediate = test_score_proportion,
+    Delayed = del_score_proportion
+  )
+
+trajectory_long <- trajectory_participants %>%
+  pivot_longer(
+    cols = c(Baseline, Immediate, Delayed),
+    names_to = "time",
+    values_to = "score"
+  ) %>%
+  filter(!is.na(score)) %>%
+  mutate(time = factor(time, levels = c("Baseline", "Immediate", "Delayed")))
+
+trajectory_model <- lme4::lmer(
+  score ~ time * ai_group + (1 | participant_id),
+  data = trajectory_long,
+  REML = TRUE
+)
+```
+
+Control-group learning gains compare immediate and delayed performance with baseline, with 95% confidence intervals.
+
+```{r no-ai-baseline-gains}
+no_ai_means <- emmeans(
+  trajectory_model, ~ time | ai_group, lmer.df = "satterthwaite"
+)
+no_ai_gains <- as.data.frame(summary(contrast(
+  no_ai_means, method = list(
+    "Immediate - Baseline" = c(-1, 1, 0),
+    "Delayed - Baseline" = c(-1, 0, 1)
+  ), adjust = "none"
+), infer = c(TRUE, FALSE))) %>%
+  filter(ai_group == "Control")
+knitr::kable(no_ai_gains %>% transmute(
+    Comparison = contrast,
+    `Gain (pp)` = sprintf("%.2f", 100 * estimate),
+    `95% CI (pp)` = sprintf("[%.2f, %.2f]", 100 * lower.CL, 100 * upper.CL)
+  ))
+```
+
+<details>
+<summary>Full output and unformatted results</summary>
+
+```{r no-ai-baseline-gains-raw}
+print(summary(trajectory_model), correlation = TRUE, digits = 17)
+print(as.data.frame(no_ai_means), digits = 17, row.names = FALSE)
+print(as.data.frame(no_ai_gains), digits = 17, row.names = FALSE)
+```
+
+</details>
+
+The figure uses model-estimated control-group means and gains, expressed as percentages and percentage-point differences, respectively.
+
+```{r control-learning-figure-data}
+control_learning_counts <- trajectory_long %>%
+  filter(ai_group == "Control") %>%
+  count(time, name = "n_observed")
+control_learning_means <- as.data.frame(confint(
+  no_ai_means, level = .95, adjust = "none"
+)) %>%
+  filter(ai_group == "Control") %>%
+  transmute(
+    time, performance_percent = 100 * emmean,
+    CI_low_percent = 100 * lower.CL, CI_high_percent = 100 * upper.CL
+  )
+control_learning_gains <- no_ai_gains %>%
+  transmute(
+    assessment = factor(sub(" - Baseline", "", contrast, fixed = TRUE),
+                        levels = c("Delayed", "Immediate")),
+    gain_pp = 100 * estimate,
+    CI_low_pp = 100 * lower.CL, CI_high_pp = 100 * upper.CL,
+    gain_label = sprintf("%+.2f pp", gain_pp)
+  )
+control_learning_n_labels <- setNames(
+  sprintf("%s\n(n = %d)", control_learning_counts$time,
+          control_learning_counts$n_observed),
+  as.character(control_learning_counts$time)
+)
+
+
+```
+
+Supplementary Fig. 3 shows the control-group performance trajectory and gains from baseline.
+
+```{r control-learning-trajectory-figure, fig.width=180/25.4, fig.height=85/25.4, dpi=600}
+control_learning_colours <- c(
+  Baseline = "#9AA8AD", Immediate = "#264653", Delayed = "#C46F6F"
+)
+control_learning_theme <- theme_classic(base_size = 7, base_family = figure_font) +
+  theme(
+    axis.text = element_text(size = 7, colour = "black"),
+    axis.line = element_line(linewidth = .25),
+    axis.ticks = element_line(linewidth = .25),
+    axis.ticks.length = grid::unit(1, "mm"),
+    plot.tag = element_text(size = 9, face = "bold"),
+    plot.tag.position = "topleft",
+    plot.title = element_text(size = 7, face = "bold", hjust = 0),
+    plot.margin = margin(5, 6, 4, 5),
+    legend.position = "none"
+  )
+control_learning_trajectory_panel <- ggplot() +
+  geom_line(
+    data = control_learning_means,
+    aes(time, performance_percent, group = 1), linewidth = .3, colour = "black"
+  ) +
+  geom_errorbar(
+    data = control_learning_means,
+    aes(time, ymin = CI_low_percent, ymax = CI_high_percent, colour = time),
+    width = .1, linewidth = .4
+  ) +
+  geom_point(
+    data = control_learning_means,
+    aes(time, performance_percent, colour = time), size = 1.8
+  ) +
+  scale_colour_manual(values = control_learning_colours) +
+  scale_x_discrete(labels = control_learning_n_labels) +
+  scale_y_continuous(breaks = seq(40, 80, 10), expand = expansion(mult = .02)) +
+  coord_cartesian(ylim = c(0, 100)) +
+  labs(x = "Assessment", y = "Unaided performance (% correct)",
+       title = "Control, no incentive", tag = "a") +
+  control_learning_theme
+control_learning_gain_panel <- ggplot(
+  control_learning_gains, aes(gain_pp, assessment)
+) +
+  geom_vline(xintercept = 0, linetype = "dashed", linewidth = .3, colour = "grey50") +
+  geom_segment(
+    aes(x = CI_low_pp, xend = CI_high_pp, yend = assessment, colour = assessment), linewidth = .5
+  ) +
+  geom_point(aes(colour = assessment), size = 1.8) +
+  geom_text(aes(label = gain_label), nudge_y = .19, family = figure_font, size = 7 / ggplot2::.pt) +
+  scale_colour_manual(values = control_learning_colours) +
+  scale_x_continuous(expand = expansion(mult = c(.05, .12))) +
+  expand_limits(x = 0) +
+  scale_y_discrete(expand = expansion(add = .65)) +
+  labs(x = "Gain over baseline (percentage points)", y = NULL,
+       title = "Learning gains", tag = "b") +
+  control_learning_theme
+
+control_learning_figure <- patchwork::wrap_plots(
+  control_learning_trajectory_panel, control_learning_gain_panel,
+  nrow = 1, widths = c(.53, .47)
+)
+print(control_learning_figure)
+ggsave(
+  file.path(figure_dir, "control_learning_trajectory.pdf"),
+  plot = control_learning_figure, width = 180, height = 85, units = "mm",
+  device = grDevices::cairo_pdf, bg = "white"
+)
+ggsave(
+  file.path(figure_dir, "control_learning_trajectory.png"),
+  plot = control_learning_figure, width = 180, height = 85, units = "mm",
+  dpi = 600, bg = "white"
+)
+```
+
+# Participant flow
+
+The flow table applies exclusions cumulatively. Session counts and retention rates use assigned participants with baseline data who did not withdraw consent or decline data use. Completion means a score is available; Pearson chi-square tests compare retention across the four conditions.
+
+```{r participant-flow}
+flow_steps <- list(
+  "Recruited and approved on Prolific" = participants_all$recruitment_status == "APPROVED",
+  "Consent retained" = !participants_all$consent_withdrawn,
+  "Honesty check approved" = !participants_all$declined_data_use,
+  "Passed attention check" = participants_all$attention_check_passed,
+  "Baseline data available" = participants_all$has_baseline,
+  "Continued beyond baseline" = participants_all$assigned,
+  "Completed Training 1" = participants_all$has_training_1,
+  "Completed Training 2" = participants_all$has_training_2,
+  "Completed immediate test: primary sample" = participants_all$has_immediate_test,
+  "Completed delayed test" = participants_all$has_delayed_test
+)
+flow_kept <- Reduce(`&`, flow_steps, accumulate = TRUE)
+sample_flow <- data.frame(
+  Step = names(flow_steps),
+  Remaining = vapply(flow_kept, sum, integer(1))
+) %>%
+  mutate(Removed = lag(Remaining) - Remaining) %>%
+  select(Step, Removed, Remaining)
+
+retention_counts <- participants_all %>%
+  filter(included_retention) %>%
+  group_by(group_condition, condition_label) %>%
+  summarise(n_assigned = n(), n_training_1 = sum(has_training_1),
+            n_training_2 = sum(has_training_2), n_immediate = sum(has_immediate_test),
+            n_delayed = sum(has_delayed_test), .groups = "drop") %>%
+  arrange(condition_label)
+knitr::kable(sample_flow, caption = "Cumulative participant flow")
+
+session_flow <- retention_counts %>%
+  transmute(Condition = as.character(condition_label),
+    `Continued beyond baseline (n)` = n_assigned, `Training 1 completed (n)` = n_training_1,
+    `Training 2 completed (n)` = n_training_2, `Immediate completed (n)` = n_immediate,
+    `Delayed completed (n)` = n_delayed)
+session_flow <- bind_rows(session_flow,
+  data.frame(Condition = "Pooled", as.list(colSums(session_flow[-1])), check.names = FALSE))
+knitr::kable(session_flow, caption = "Session completion by condition")
+retention_transitions <- list(
+  "Training 1 to immediate" = c("n_training_1", "n_immediate"),
+  "Training 1 to delayed" = c("n_training_1", "n_delayed"),
+  "Immediate to delayed" = c("n_immediate", "n_delayed")
+)
+retention_by_condition <- bind_rows(lapply(names(retention_transitions), function(label) {
+  columns <- retention_transitions[[label]]
+  data.frame(
+    Condition = as.character(retention_counts$condition_label), Transition = label,
+    Eligible = retention_counts[[columns[1]]], Completed = retention_counts[[columns[2]]],
+    `Retention (%)` = 100 * retention_counts[[columns[2]]] / retention_counts[[columns[1]]],
+    check.names = FALSE
+  )
+}))
+pooled_retention <- retention_by_condition %>%
+  group_by(Transition) %>%
+  summarise(Condition = "Pooled", Eligible = sum(Eligible), Completed = sum(Completed),
+            `Retention (%)` = 100 * Completed / Eligible, .groups = "drop") %>%
+  arrange(match(Transition, names(retention_transitions))) %>%
+  select(Condition, Transition, Eligible, Completed, `Retention (%)`)
+knitr::kable(bind_rows(pooled_retention, retention_by_condition), digits = 1,
+             caption = "Retention between assessments")
+
+retention_tests <- bind_rows(lapply(names(retention_transitions), function(label) {
+  counts <- filter(retention_by_condition, Transition == label)
+  result <- chisq.test(cbind(Not_completed = counts$Eligible - counts$Completed,
+                            Completed = counts$Completed), correct = FALSE)
+  data.frame(Transition = label, Eligible = sum(counts$Eligible),
+             `Chi-square` = unname(result$statistic), df = unname(result$parameter),
+             p = fmt_p(result$p.value), check.names = FALSE)
+}))
+knitr::kable(retention_tests, digits = 2,
+             caption = "Pearson chi-square tests of retention by condition")
+```
+
+# Correlation between baseline and subsequent unaided performance
+
+Baseline–test correlations are calculated after removing condition means. Approximate 95% Fisher-z confidence intervals account for the three condition contrasts; the sample-size planning assumption is rho = .60.
+
+```{r baseline-correlations-ci}
+baseline_correlation <- function(dat, outcome) {
+  dat <- dat[complete.cases(dat[, c("bl_score_proportion", outcome,
+                                  "group_condition")]), ]
+  x <- dat$bl_score_proportion
+  y <- dat[[outcome]]
+  n <- nrow(dat)
+  condition_design <- model.matrix(~ factor(group_condition), data = dat)
+  k <- qr(condition_design)$rank - 1L
+  x <- lm.fit(condition_design, x)$residuals
+  y <- lm.fit(condition_design, y)$residuals
+  r <- cor(x, y)
+  ci <- tanh(atanh(r) + c(-1, 1) * qnorm(.975) / sqrt(n - k - 3))
+  data.frame(Outcome = outcome, N = n,
+             r = r, CI_lower = ci[1], CI_upper = ci[2])
+}
+
+baseline_correlation_results <- bind_rows(lapply(
+  c("test_score_proportion", "del_score_proportion"), function(outcome) {
+    baseline_correlation(participants, outcome)
+  }
+))
+appendix_baseline_correlations <- baseline_correlation_results %>%
+  transmute(
+    Assessment = ifelse(Outcome == "test_score_proportion", "Immediate", "Delayed"),
+    N, r, `95% CI` = sprintf("[%.2f, %.2f]", CI_lower, CI_upper)
+  )
+knitr::kable(appendix_baseline_correlations, digits = 2)
+cat("Sample-size planning assumption: rho = .60.\n")
+```
+
+<details>
+<summary>Full output and unformatted results</summary>
+
+```{r baseline-correlations-ci-raw}
+print(as.data.frame(baseline_correlation_results), digits = 17, row.names = FALSE)
+```
+
+</details>
+
+# Reproducibility information
+
+```{r session-info}
+sessionInfo()
+```
+

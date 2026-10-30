@@ -1,0 +1,11 @@
+.DS_Store
+
+.Rproj.user/
+renv/library/
+renv/staging/
+.Rhistory
+.RData
+.RDataTmp
+.Ruserdata
+Rplots.pdf
+DeskillingStage*.pdf
